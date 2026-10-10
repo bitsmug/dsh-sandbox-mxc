@@ -1,0 +1,33 @@
+# dsh-sandbox-mxc bundle patch —— 把 DSH 的进程沙箱提供者换成 MXC。
+#
+# 做法（官方方言）：
+#   ① 把默认 provider（`@deepseek-ai/dsh-sandbox-local`，即 ACL 受限令牌 runner）按 id 停掉；
+#   ② 插入本插件——它提供同一个服务名 `sandbox`（`SandboxProvider` 构造时 `super(ctx, 'sandbox')`），
+#      因此 DSH 的消费方（pwsh / bash / fs 三个 tool 家族）无须改动。
+#
+# 为什么不用"把 id=sandbox 那行的 name 改掉"：方言规定 truthy `name` 是**断言**既有行而非重命名 ⇒
+# 只能"停旧行 + 插新行"。
+#
+# 改本文件后需要**重启 profile** 才生效（provider 在 host 平面）。
+
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+  disabled: true
+
+- insert:
+    - id: sandbox-mxc
+      name: dsh-sandbox-mxc
+      config:
+        # MXC 执行器的绝对路径。留空 ⇒ 插件依次尝试：
+        #   ① 环境变量 DSH_MXC_WXC；② 从 @microsoft/mxc-sdk 包内推导 bin/x64/wxc-exec.exe。
+        # 三条都拿不到 ⇒ 插件 fail-closed（抛 SandboxUnavailableError），绝不静默放行。
+        wxcExecPath: !!js process.env.DSH_MXC_WXC ?? ''
+        # 除工作区之外还要**只读**开放的根（例如工具链目录）。实测：白名单之外连【读】都会被拒。
+        readonlyPaths: []
+        # 除 writableRoots(policy) 之外额外可写的根。
+        extraWritablePaths: []
+        # 一律拒绝的根（MXC filesystem.deniedPaths）。
+        deniedPaths: []
+        # 网络：不写 ⇒ 用 MXC 默认（实测 default_policy=block，即不出网）。
+        # timeoutMs: 0
+        # containerIdPrefix: dsh-mxc
