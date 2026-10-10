@@ -28,6 +28,9 @@
       "patch": "./cordis.patch.yml"
     }
   },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-sandbox": "^0.2.0-rc.2"
+  },
   "scripts": {
     "test": "node --test \"tests/**/*.test.mjs\""
   },
@@ -36,6 +39,9 @@
   },
   "dependencies": {
     "@microsoft/mxc-sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-sandbox": "^0.2.0-rc.2"
   },
   "license": "MIT",
   "keywords": [
