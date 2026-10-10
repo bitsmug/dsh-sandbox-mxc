@@ -1,0 +1,10 @@
+# pnpm 11 默认把"依赖带 build script 而未被允许构建"当成**致命错误**
+# （ERR_PNPM_IGNORED_BUILDS ⇒ install 直接 exit 1，CI 的 Publish workflow 就挂在这一步）。
+#
+# 本包**不 import** @microsoft/mxc-sdk 的任何原生绑定，只用它包内的 bin/x64/wxc-exec.exe；
+# koffi / node-pty 是 SDK 自己 PTY 功能用的原生模块 ⇒ 我们不需要构建它们。
+#
+# 只关严格模式（不给白名单）：pnpm 11.7 实测只有这一种写法能让 install 通过 ——
+# ignoredBuiltDependencies / onlyBuiltDependencies 无论写在 package.json 的 pnpm 字段
+# 还是写在本文件里，都仍然报 ERR_PNPM_IGNORED_BUILDS。
+strictDepBuilds: false
