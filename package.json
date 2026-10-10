@@ -1,7 +1,14 @@
 {
   "name": "dsh-sandbox-mxc",
   "version": "0.1.0",
-  "private": true,
+  "author": "dsh-sandbox-mxc-dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bitsmug/dsh-sandbox-mxc.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "DeepSeek Harness sandbox provider backed by MXC (Microsoft eXecution Containers): wraps ctx.sandbox.confine() argv as `wxc-exec --config-base64 <policy> -- <command>` on the BaseContainer backend. One runtime dependency (@microsoft/mxc-sdk, for the wxc-exec executable), no kernel patch.",
   "type": "module",
   "main": "./lib/index.js",

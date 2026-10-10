@@ -1,0 +1,100 @@
+# dsh-sandbox-mxc → npm 自动发布
+# 触发：① 手动（Actions 页面 Run workflow）② 推送 v* tag
+# 发布版本 = package.json 的 version；tag 触发时会校验 tag 与版本一致。
+# 仅「x.y.z 三段纯数字」版本号自动发布；含字母（如 0.1.0-alpha.1）一律跳过（预发布只手动发）。
+# 前置：仓库 Secrets 需配置 NPM_TOKEN（npm 账号 Access Token，publish 权限）。
+
+name: publish
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  check:
+    runs-on: windows-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version and gate on pure numeric x.y.z
+        id: check
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+          else
+            version="$(node -p "require('./package.json').version")"
+          fi
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+            echo "Pure numeric version ${version} -> will publish"
+          else
+            echo "version=${version}" >> "$GITHUB_OUTPUT"
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Version ${version} contains non-numeric segments; auto-publish skipped (prerelease builds are manual only)."
+          fi
+
+  publish:
+    needs: check
+    if: needs.check.outputs.should_publish == 'true'
+    # 本插件是 Windows-only（MXC 的 BaseContainer 后端 + wxc-exec.exe）⇒ 用 Windows runner
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Install deps
+        run: pnpm install
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v${tag} != package version ${pkg}"
+            exit 1
+          fi
+          echo "Publishing dsh-sandbox-mxc@${pkg}"
+
+      - name: Preflight — publishable package and required files present
+        # 这一步拦两类"看着能发、发出去却是坏的"：
+        #   ① package.json 里 private:true ⇒ npm 直接拒发；
+        #   ② files 里点名的关键文件不存在 ⇒ 装到用户机器上挂不起来。
+        shell: bash
+        run: |
+          priv="$(node -p "require('./package.json').private === true")"
+          if [ "$priv" = "true" ]; then
+            echo "::error::package.json has \"private\": true — npm publish would refuse"
+            exit 1
+          fi
+          for f in lib/index.js cordis.patch.yml README.md LICENSE; do
+            if [ ! -f "$f" ]; then
+              echo "::error::required file missing: $f"
+              exit 1
+            fi
+          done
+          echo "publishable; required files present"
+
+      - name: Publish to npm
+        run: pnpm publish --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
