@@ -24,6 +24,48 @@ wxc-exec.exe --config-base64 <policy-json> -- <original argv...>
   `writableRoots(policy)` / `canonicalPath(path)` exported by `@deepseek-ai/dsh-sandbox`, so the
   meaning of `read-only` / `workspace-write` stays in one place.
 
+## Requirements
+
+- **Windows.** This provider drives MXC's Windows backends (`wxc-exec.exe`, ProcessContainer / AppContainer).
+- **DeepSeek Harness** that mounts the `sandbox` service (`@deepseek-ai/dsh-sandbox` — declared in `peerDependencies`; never bundled).
+- **Node.js `>=22`** — the harness's own Node is fine.
+- **`wxc-exec.exe`** — resolved from the installed `@microsoft/mxc-sdk` (a normal dependency), else `config.wxcExecPath`, else `$DSH_MXC_WXC`.
+- **An *unpackaged* PowerShell**, when the profile's pwsh tool points at a Store/MSIX build: MXC containers **cannot launch packaged (MSIX) apps**
+  (`The target executable '…\WindowsApps\…\pwsh.exe' appears to be a packaged (MSIX) app`). Point the executor's `pwshPath` at an unpackaged
+  build — e.g. the official ZIP extracted to a stable directory of your choosing.
+- **That shell's own install directory must be readable inside the container** — list it in `config.readonlyPaths`. An unpackaged PowerShell
+  resolves its own path at startup and otherwise fails with `Failed to resolve full path of the current executable`.
+- **Paths that do not exist on this machine are dropped automatically.** Handing one to MXC makes it reject the *whole* policy
+  (`DACL fallback requires write-DACL permission on '/tmp'` — `/tmp` is what the shared harness code contributes on Windows), so the
+  provider filters every path list through an existence check before building the policy.
+- **On MXC's `appcontainer-dacl` tier**, the account must be able to write a DACL for every path in the policy. When it cannot — a volume
+  owned by another SID, or a path the container turns out not to be able to read — the provider **drops that path and prints why**, instead
+  of failing the command, and caches the verdict. It never asks for per-machine ACL surgery. The strong `base-container` tier needs no
+  DACL work at all.
+
+## Verified environment
+
+Measured on the development machine; it is a record, not a claim about yours.
+
+| Item | Value |
+|---|---|
+| OS | Windows (x64) |
+| Harness | DSH `0.2.0-rc.2` |
+| Node.js | `v24.20.0` (the harness's own) |
+| Shell | PowerShell `7.7.0-preview.5`, **unpackaged** (ZIP-extracted) |
+| MXC | `@microsoft/mxc-sdk` `1.0.0`; `wxc-exec --probe` reported the **BaseContainer** tier on a Windows 11 host and the **AppContainer + DACL** tier on a Windows 10 host |
+
+Measured behaviour (the full matrix is under `## Security posture`): workspace writes allowed; writes **and reads** outside the policy denied;
+outbound network blocked by default; clipboard isolated from the host. Two tier-dependent facts are worth knowing before trusting a machine:
+
+- **`base-container` needs Windows 11; Windows 10 can only use the DACL tier.** Same binary, two hosts:
+  on **Windows 11** (build ≥ 26100) `wxc-exec --probe` reports `tier=base-container / needsDaclAugmentation=false /
+  baseContainerApiPresent=true`; on **Windows 10** it reports `tier=appcontainer-dacl /
+  needsDaclAugmentation=true / baseContainerApiPresent=false` — the process-security-environment API the strong tier needs is
+  simply not there, so on Windows 10 every path in the policy must be DACL-augmentable (see `## Requirements`, where the provider
+  handles that by dropping and reporting). `wxc-host-prep.exe` (elevated) clears the system-drive and NUL-device warnings but
+  cannot create the missing API.
+
 ## Install
 
 Two things are independent: **(a)** installing this plugin, and **(b)** making a `wxc-exec`

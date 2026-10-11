@@ -13,12 +13,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
+import { dirname } from 'node:path';
 import { canonicalPath } from '@deepseek-ai/dsh-sandbox';
 import {
+  adaptConfigForTier,
   buildPolicyConfig,
   buildRunnerArgv,
+  buildValidationCommand,
+  pathsFromValidationOutput,
   MXC_CONTRACT_VERSION,
   normalizeConfig,
+  parseTierFromProbe,
+  pathsFromDaclError,
+  prunePolicyPaths,
   resolveWxcExecutable,
 } from '../lib/index.js';
 
@@ -41,7 +48,10 @@ test('normalizeConfig：缺省值稳定（零依赖手写校验）', () => {
 });
 
 test('buildPolicyConfig：workspace-write ⇒ 工作区可写；ui 三项与 processContainer.ui 按实测口径钉死', () => {
-  const cfg = normalizeConfig({ extraWritablePaths: ['C:/fixture-extra'] });
+  // ★ extraWritablePaths 必须是**本机真实存在**的目录：不存在的路径会被 existingPaths 丢掉
+  //   （否则 MXC 会拿它申请写 DACL 并拒绝整条策略 —— 真机实测过 /tmp 就是这个坑）。
+  const extraWritable = dirname(process.cwd());
+  const cfg = normalizeConfig({ extraWritablePaths: [extraWritable] });
   const config = buildPolicyConfig(POLICY_WRITE, cfg, 'unit-test');
 
   assert.equal(config.version, MXC_CONTRACT_VERSION);
@@ -52,8 +62,14 @@ test('buildPolicyConfig：workspace-write ⇒ 工作区可写；ui 三项与 pro
   // 平台临时区也应在（mode 的语义由 dsh-sandbox 决定，不在这里重写）
   assert.ok(config.filesystem.readwritePaths.includes(canonicalPath(tmpdir())),
     '临时区必须可写（否则 mkstemp 家族工具跑不起来）');
-  // 额外可写
-  assert.ok(config.filesystem.readwritePaths.includes(canonicalPath('C:/fixture-extra')));
+  // 额外可写：存在的路径必须保留
+  assert.ok(config.filesystem.readwritePaths.includes(canonicalPath(extraWritable)),
+    '存在的 extraWritablePaths 必须保留');
+  // 额外可写：**不存在**的必须被丢掉（这正是真机上 /tmp 拖垮整条策略的那条规则）
+  const ghostCfg = normalizeConfig({ extraWritablePaths: ['Z:/fixture-missing-dir'] });
+  const ghostConfig = buildPolicyConfig(POLICY_WRITE, ghostCfg, 'unit-test-ghost');
+  assert.ok(!ghostConfig.filesystem.readwritePaths.some((p) => p.includes('fixture-missing-dir')),
+    '不存在的 extraWritablePaths 必须被丢掉');
 
   // ★ 安全默认：Win32k 放开，但剪贴板/注入显式关闭
   assert.deepEqual(config.ui, { disable: false, clipboard: 'none', injection: false });
@@ -117,4 +133,51 @@ test('resolveWxcExecutable：显式路径优先；无候选时要么落 SDK 分�
   } finally {
     if (savedEnv !== undefined) process.env.DSH_MXC_WXC = savedEnv;
   }
+});
+
+import { existsSync } from 'node:fs';
+
+test('buildPolicyConfig：丢掉机器上不存在的路径（/tmp 这类 POSIX 路径会拖垮整条策略）', () => {
+  const cfg = normalizeConfig({});
+  const config = buildPolicyConfig(POLICY_WRITE, cfg, 'unit-existing-only');
+  const all = [...config.filesystem.readwritePaths, ...config.filesystem.readonlyPaths, ...config.filesystem.deniedPaths];
+  assert.ok(config.filesystem.readwritePaths.length >= 1, '可写列表不能为空');
+  for (const p of all) assert.ok(existsSync(p), `策略里不得出现不存在的路径：${p}`);
+  assert.ok(!all.includes('/tmp'), '/tmp 这类不存在于本机的路径必须被丢掉');
+  assert.ok(
+    config.filesystem.readwritePaths.includes(canonicalPath(POLICY_WRITE.workspaceRoot)),
+    '工作区必须仍精确落在可写列表里',
+  );
+});
+
+test('便携适配：档位解析 / 报错抠路径 / 剔路径（纯函数）', () => {
+  assert.deepEqual(parseTierFromProbe('{"tier":"appcontainer-dacl","needsDaclAugmentation":true}'),
+    { tier: 'appcontainer-dacl', needsDaclAugmentation: true });
+  assert.deepEqual(parseTierFromProbe('不是 JSON'), { tier: 'unknown', needsDaclAugmentation: false });
+
+  const mxcError = "error: BaseContainer is unavailable; DACL fallback requires write-DACL permission on 'X:\\toolchain\\app', which the current user lacks";
+  assert.deepEqual(pathsFromDaclError(mxcError), ['X:\\toolchain\\app']);
+  assert.deepEqual(pathsFromDaclError('no path here'), []);
+
+  const cfg = normalizeConfig({ readonlyPaths: [process.cwd()] });
+  const config = buildPolicyConfig(POLICY_WRITE, cfg, 'unit-prune');
+  const { config: pruned, dropped } = prunePolicyPaths(config, [canonicalPath(process.cwd())]);
+  assert.ok(dropped.some((entry) => entry.startsWith('readonlyPaths:')), '应报出被剔掉的类别与路径');
+  assert.ok(!pruned.filesystem.readonlyPaths.includes(canonicalPath(process.cwd())), '只读白名单里不该再有它');
+  assert.ok(pruned.filesystem.readwritePaths.length >= 1, '可写根不受影响');
+
+  // 强档必须恒等（不许动策略）：用一个不存在的执行器也不该抛（内部会退化成 unknown ⇒ 走验证分支）
+  assert.equal(typeof adaptConfigForTier, 'function');
+});
+
+test('便携适配：策略里"容器起得来但读不到"的路径也要被认出来（纯函数）', () => {
+  assert.equal(buildValidationCommand([]), 'exit 0');
+  const command = buildValidationCommand(['X:\\toolchain\\app', 'C:\\work', 'X:\\toolchain\\app']);
+  assert.equal(command.split(' & ').length, 2, '重复路径要去重，每条各自成段');
+  assert.ok(command.includes('dir /b "X:\\toolchain\\app"'), '每条路径都要真的去列一次');
+  assert.ok(command.includes('|| echo MXCBAD X:\\toolchain\\app'), '读不到要打出可回收的标记');
+
+  assert.deepEqual(pathsFromValidationOutput('MXCOK C:\\work\r\nMXCBAD X:\\toolchain\\app\r\n'), ['X:\\toolchain\\app']);
+  assert.deepEqual(pathsFromValidationOutput('没有任何标记'), []);
+  assert.deepEqual(pathsFromValidationOutput('MXCBAD A\nMXCBAD A'), ['A'], '重复要合并');
 });
