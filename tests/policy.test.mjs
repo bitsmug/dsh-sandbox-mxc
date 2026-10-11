@@ -217,7 +217,9 @@ test('node 管道 shim：源码非空、能整段解码回来、带全部关键�
   const option = nodeOptionsWithShim();
   const prefix = '--import data:text/javascript,';
   assert.ok(option.startsWith(prefix), option.slice(0, 60));
-  assert.ok(!option.includes(' '), 'NODE_OPTIONS 以空格分词 ⇒ data: URL 里不许有空格');
+  // ★ flag 与取值之间那个空格是 NODE_OPTIONS 的正常形态（--import <url> 就是两段）；
+  //   只有 data: URL **内部**出现原始空格才会被分词切碎（源码里的空格已被 encodeURIComponent 编成 %20）。
+  assert.ok(!option.slice(prefix.length).includes(' '), 'data: URL 内部不许有空格（NODE_OPTIONS 以空格分词）');
   assert.equal(decodeURIComponent(option.slice(prefix.length)), NOPIPE_SHIM_SOURCE, 'data: URL 必须能整段解码回源码');
   const markers = ['MXC_NAMED_PIPE_UNAVAILABLE', 'spawnSync', 'execFileSync', 'execSync', 'closeSync', 'mkdtempSync', 'unlinkSync'];
   for (const marker of markers) assert.ok(NOPIPE_SHIM_SOURCE.includes(marker), 'shim 源码缺少 ' + marker);
