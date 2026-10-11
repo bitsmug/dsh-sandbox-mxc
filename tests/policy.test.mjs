@@ -20,6 +20,8 @@ import {
   buildPolicyConfig,
   buildRunnerArgv,
   buildValidationCommand,
+  nodeOptionsWithShim,
+  NOPIPE_SHIM_SOURCE,
   pathsFromValidationOutput,
   MXC_CONTRACT_VERSION,
   normalizeConfig,
@@ -180,4 +182,54 @@ test('便携适配：策略里"容器起得来但读不到"的路径也要被认
   assert.deepEqual(pathsFromValidationOutput('MXCOK C:\\work\r\nMXCBAD X:\\toolchain\\app\r\n'), ['X:\\toolchain\\app']);
   assert.deepEqual(pathsFromValidationOutput('没有任何标记'), []);
   assert.deepEqual(pathsFromValidationOutput('MXCBAD A\nMXCBAD A'), ['A'], '重复要合并');
+});
+
+test('node 管道 shim：默认把 NODE_OPTIONS 注入 process.env；开关关掉后完全不碰 env', () => {
+  assert.equal(normalizeConfig({}).injectNodePipeShim, true, '默认开');
+  assert.equal(normalizeConfig({ injectNodePipeShim: true }).injectNodePipeShim, true);
+  assert.equal(normalizeConfig({ injectNodePipeShim: false }).injectNodePipeShim, false);
+  assert.equal(normalizeConfig({ injectNodePipeShim: 'yes' }).injectNodePipeShim, false, '只认布尔 true');
+
+  const config = buildPolicyConfig(POLICY_WRITE, normalizeConfig({}), 'unit-shim');
+  // ★ env / inheritDefaultEnv 是 wire 契约里 **process** 的字段（generated/v1_0_0/wire.d.ts 的 Process 接口）
+  assert.equal(config.env, undefined, '顶层 env 会被 wire 忽略，不许写在那里');
+  assert.equal(config.process.inheritDefaultEnv, true, '必须叠加到后端默认环境之上（否则会丢 PATH）');
+  const entry = config.process.env.find((item) => item.startsWith('NODE_OPTIONS='));
+  assert.ok(entry !== undefined, '必须注入 NODE_OPTIONS：' + JSON.stringify(config.process.env));
+  assert.ok(entry.includes('--import data:text/javascript,'), 'NODE_OPTIONS 必须带 data: URL 的 --import：' + entry.slice(0, 80));
+  // 宿主已设 NODE_OPTIONS 时它会被原样前置 ⇒ 只在它为空时断言严格前缀（避免依赖环境的测试）
+  const hostOptions = (process.env.NODE_OPTIONS ?? '').trim();
+  if (hostOptions === '') {
+    assert.ok(entry.startsWith('NODE_OPTIONS=--import data:text/javascript,'), entry.slice(0, 80));
+  } else {
+    assert.ok(entry.startsWith('NODE_OPTIONS=' + hostOptions + ' '), '既有 NODE_OPTIONS 必须保留在前：' + entry.slice(0, 80));
+  }
+  for (const item of config.process.env) assert.ok(item.includes('='), 'env 每项必须是 KEY=VALUE：' + item);
+
+  const off = buildPolicyConfig(POLICY_WRITE, normalizeConfig({ injectNodePipeShim: false }), 'unit-shim-off');
+  assert.equal(off.process.env, undefined, '关掉 shim ⇒ 不碰 env');
+  assert.equal(off.process.inheritDefaultEnv, undefined, '关掉 shim ⇒ 不碰 inheritDefaultEnv');
+});
+
+test('node 管道 shim：源码非空、能整段解码回来、带全部关键标记', () => {
+  assert.equal(typeof NOPIPE_SHIM_SOURCE, 'string');
+  assert.ok(NOPIPE_SHIM_SOURCE.length > 1000, 'shim 源码不该是空壳：' + String(NOPIPE_SHIM_SOURCE.length));
+  const option = nodeOptionsWithShim();
+  const prefix = '--import data:text/javascript,';
+  assert.ok(option.startsWith(prefix), option.slice(0, 60));
+  assert.ok(!option.includes(' '), 'NODE_OPTIONS 以空格分词 ⇒ data: URL 里不许有空格');
+  assert.equal(decodeURIComponent(option.slice(prefix.length)), NOPIPE_SHIM_SOURCE, 'data: URL 必须能整段解码回源码');
+  const markers = ['MXC_NAMED_PIPE_UNAVAILABLE', 'spawnSync', 'execFileSync', 'execSync', 'closeSync', 'mkdtempSync', 'unlinkSync'];
+  for (const marker of markers) assert.ok(NOPIPE_SHIM_SOURCE.includes(marker), 'shim 源码缺少 ' + marker);
+  // ESM 源码里有 import 语句，没法用 new Function 解析 ⇒ 语法由补丁脚本的 node --check 负责
+  assert.ok(NOPIPE_SHIM_SOURCE.includes('node:child_process'), 'shim 必须从 node:child_process 取实现在覆写');
+});
+
+test('容器环境：sandboxEnv 逐项注入（不含 = 的项被丢掉）', () => {
+  const cfg = normalizeConfig({ sandboxEnv: ['DSH_PROBE=1', 'BAD_ENTRY', 42] });
+  assert.deepEqual(cfg.sandboxEnv, ['DSH_PROBE=1'], '非 KEY=VALUE 的项必须被丢掉（MXC 会让整条命令 malformed）');
+  const config = buildPolicyConfig(POLICY_WRITE, cfg, 'unit-env');
+  assert.ok(config.process.env.includes('DSH_PROBE=1'), 'sandboxEnv 必须进 process.env');
+  assert.equal(config.process.inheritDefaultEnv, true, '显式 env 也必须叠加而不是替换');
+  assert.ok(config.process.env.some((item) => item.startsWith('NODE_OPTIONS=')), 'sandboxEnv 与 NODE_OPTIONS 必须共存');
 });

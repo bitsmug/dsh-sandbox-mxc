@@ -126,6 +126,8 @@ it is never imported — it is used only to locate `wxc-exec.exe`.
 | `network` | omitted | Omitted ⇒ MXC default, which is **block** (measured `default_policy=block`). |
 | `timeoutMs` | `0` | Per-execution timeout in milliseconds; `0` = none. |
 | `containerIdPrefix` | `'dsh-mxc'` | Prefix for the diagnostic container name. |
+| `sandboxEnv` | `[]` | Extra `KEY=VALUE` entries for the container's `process.env`, layered on the backend default (`inheritDefaultEnv: true`). Entries without `=` are dropped with a warning (MXC rejects such a command outright). |
+| `injectNodePipeShim` | `true` | Inject `NODE_OPTIONS=--import data:text/javascript,…` so Node **inside the container** captures child-process output through file handles instead of named pipes, and fails fast on the async APIs. `false` leaves `process.env` / `process.inheritDefaultEnv` untouched. See *Container environment* below. |
 
 ```yaml
 - insert:
@@ -136,6 +138,39 @@ it is never imported — it is used only to locate `wxc-exec.exe`.
         readonlyPaths: []
 ```
 
+### Container environment (the Node named-pipe shim)
+
+Inside an MXC container the process token cannot create **named pipes** — which is exactly how libuv
+implements `stdio: 'pipe'`. Measured in one container on this machine:
+
+| Call inside the container | Result |
+|---|---|
+| `spawnSync(cmd.exe, ['/c','echo','hi'], { encoding: 'utf8', timeout: 300 })` | **never returns**; `timeout` / `killSignal` do not fire |
+| `spawnSync(…, { stdio: ['ignore', fd, fd] })` (file handles) | returns in **6–10 ms** |
+| `stdio: 'inherit'` / `'ignore'` | returns in 6–10 ms |
+| `.NET NamedPipeServerStream` / `net.listen` | `Access to the path is denied` / `EADDRINUSE` |
+
+So with `injectNodePipeShim: true` (the default) the provider adds one `NODE_OPTIONS` entry — an inline
+`data:text/javascript,…` preload, so **no file is written** — which, inside the container, changes
+`child_process` for every Node process the command starts:
+
+- **`spawnSync` / `execFileSync` / `execSync`** — stdout/stderr are captured through **temporary file
+  descriptors** and read back; a slot stays a pipe only if the caller asked for something else.
+  `execFileSync` / `execSync` are re-implemented on purpose: Node’s own implementations do not go
+  through the overridden `spawnSync` export, so overriding the export alone would not cover them. The
+  `exec*Sync` error shape (`status` / `stdout` / `stderr`, message starting with `Command failed: `) and
+  Node's default `encoding: 'buffer'` are preserved; `maxBuffer` no longer applies (output goes to a file).
+- **`spawn` / `exec` / `execFile` / `fork`** — **throw immediately** with
+  `code: 'MXC_NAMED_PIPE_UNAVAILABLE'` and a message naming the API, instead of hanging forever.
+
+Notes: the shim also governs any Node process the container’s command starts (`NODE_OPTIONS` is
+inherited — that is the point), and a command that genuinely needs asynchronous child processes has to
+run **outside** the container. Set `injectNodePipeShim: false` to leave the container environment exactly
+as it was before this feature.
+
+The shim travels in the **command line** (environment → config JSON → `--config-base64`), and Windows
+caps a command line at ≈32767 characters — so the inlined source is kept comment-lean and the patch
+script asserts the encoded size (currently ≈14566 characters for the `NODE_OPTIONS` entry).
 ### Mode mapping
 
 | Harness mode | MXC `filesystem` |
